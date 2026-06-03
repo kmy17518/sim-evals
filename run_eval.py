@@ -74,7 +74,14 @@ def main(
 
     obs, _ = env.reset()
     obs, _ = env.reset() # need second render cycle to get correctly loaded materials
-    client = DroidJointPosClient()
+    # Policy endpoint configurable via env (default localhost:8000 = local server).
+    # For a remote Modal endpoint pass PIWAN_POLICY_HOST="wss://...modal.run" (port unset).
+    import os
+    _host = os.environ.get("PIWAN_POLICY_HOST", "localhost")
+    _port_env = os.environ.get("PIWAN_POLICY_PORT", "")
+    _port = int(_port_env) if _port_env else (None if _host.startswith("ws") else 8000)
+    print(f"[run_eval] policy endpoint: host={_host!r} port={_port}", flush=True)
+    client = DroidJointPosClient(remote_host=_host, remote_port=_port)
 
 
     video_dir = Path("runs") / datetime.now().strftime("%Y-%m-%d") / datetime.now().strftime("%H-%M-%S")

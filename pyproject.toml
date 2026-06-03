@@ -18,6 +18,14 @@ override-dependencies = [
   "websockets>=16.0"
 ]
 
+[tool.uv.extra-build-dependencies]
+flatdict = ["setuptools<81"]
+construct = ["setuptools<81"]
+pyperclip = ["setuptools<81"]
+"idna-ssl" = ["setuptools<81"]
+"antlr4-python3-runtime" = ["setuptools<81"]
+tree = ["setuptools<81"]
+
 [tool.uv.sources]
 torch = [
   { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },

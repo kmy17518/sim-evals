@@ -1,3 +1,6 @@
+import os
+from collections import deque
+
 import tyro
 import numpy as np
 from PIL import Image
@@ -10,6 +13,7 @@ class Client(InferenceClient):
                 remote_host:str = "localhost", 
                 remote_port:int = 8000,
                 open_loop_horizon:int = 8,
+                history_frames: int = None,
                  ) -> None:
         self.open_loop_horizon = open_loop_horizon
         self.client = websocket_client_policy.WebsocketClientPolicy(
@@ -18,6 +22,18 @@ class Client(InferenceClient):
 
         self.actions_from_chunk_completed = 0
         self.pred_action_chunk = None
+
+        # Observation-history window. The piwan policies (A* MEM history; B* real-frame Wan
+        # conditioning video) train on the last `history_frames` CONSECUTIVE frames ending at the
+        # current step. `infer` is called every sim step (even when not re-querying), so we keep a
+        # per-step rolling buffer here and send the last N frames at query time -> the server feeds
+        # the exact stride-1 window the model trained on. Configurable via PIWAN_HISTORY_FRAMES
+        # (default 6 = the current A*/B* config); set 1 to send single frames (legacy behavior).
+        if history_frames is None:
+            history_frames = int(os.environ.get("PIWAN_HISTORY_FRAMES", 6))
+        self.history_frames = int(history_frames)
+        self._base_history = deque(maxlen=max(1, self.history_frames))
+        self._wrist_history = deque(maxlen=max(1, self.history_frames))
 
     def visualize(self, request: dict):
         """
@@ -32,28 +48,42 @@ class Client(InferenceClient):
     def reset(self):
         self.actions_from_chunk_completed = 0
         self.pred_action_chunk = None
+        # new episode -> drop the previous episode's frame history (no cross-episode leakage)
+        self._base_history.clear()
+        self._wrist_history.clear()
 
     def infer(self, obs: dict, instruction: str) -> dict:
         """
         Infer the next action from the policy in a server-client setup
         """
         curr_obs = self._extract_observation(obs)
+        # resize once; push EVERY step so the rolling window is stride-1 consecutive frames
+        base_img = image_tools.resize_with_pad(curr_obs["right_image"], 224, 224)
+        wrist_img = image_tools.resize_with_pad(curr_obs["wrist_image"], 224, 224)
+        self._base_history.append(base_img)
+        self._wrist_history.append(wrist_img)
+
         if (
             self.actions_from_chunk_completed == 0
             or self.actions_from_chunk_completed >= self.open_loop_horizon
         ):
             self.actions_from_chunk_completed = 0
             request_data = {
-                "observation/exterior_image_1_left": image_tools.resize_with_pad(
-                    curr_obs["right_image"], 224, 224
-                ),
-                "observation/wrist_image_left": image_tools.resize_with_pad(
-                    curr_obs["wrist_image"], 224, 224
-                ),
+                "observation/exterior_image_1_left": base_img,
+                "observation/wrist_image_left": wrist_img,
                 "observation/joint_position": curr_obs["joint_position"],
                 "observation/gripper_position": curr_obs["gripper_position"],
                 "prompt": instruction,
             }
+            if self.history_frames > 1:
+                # last N consecutive frames (earliest..current); the server trims/earliest-pads
+                # to the model's history_frames. uint8 [T,224,224,3] keeps the payload small.
+                request_data["observation/exterior_image_1_left_history"] = np.stack(
+                    list(self._base_history), axis=0
+                )
+                request_data["observation/wrist_image_left_history"] = np.stack(
+                    list(self._wrist_history), axis=0
+                )
             self.pred_action_chunk = self.client.infer(request_data)["actions"]
 
         action = self.pred_action_chunk[self.actions_from_chunk_completed]
@@ -65,9 +95,7 @@ class Client(InferenceClient):
         else:
             action = np.concatenate([action[:-1], np.zeros((1,))])
 
-        img1 = image_tools.resize_with_pad(curr_obs["right_image"], 224, 224)
-        img2 = image_tools.resize_with_pad(curr_obs["wrist_image"], 224, 224)
-        both = np.concatenate([img1, img2], axis=1)
+        both = np.concatenate([base_img, wrist_img], axis=1)
 
         return {"action": action, "viz": both}
 
